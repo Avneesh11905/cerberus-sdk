@@ -1,3 +1,9 @@
+/**
+ * @fileoverview Users module for the Cerberus SDK.
+ * Defines the UsersModule class which manages the current user's profile,
+ * caches the user state, and handles profile updates and deletion.
+ */
+
 import { AxiosInstance } from 'axios';
 import { User, ProfileUpdate, MessageResponse } from '../types';
 import type { CerberusClient } from '../client';
@@ -10,6 +16,11 @@ export class UsersModule {
 
   clearCache(): void {
     this.currentUser = null;
+    this.userPromise = null;
+  }
+
+  setUser(user: User): void {
+    this.currentUser = user;
     this.userPromise = null;
   }
 

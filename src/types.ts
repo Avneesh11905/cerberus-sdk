@@ -1,12 +1,17 @@
+/**
+ * @fileoverview Type definitions for the Cerberus SDK.
+ * Contains interfaces for configuration, user models, API responses, 
+ * and session data used throughout the SDK.
+ */
+
 export interface CerberusConfig {
-  baseUrl: string;
+  baseUrl?: string;
   apiKey: string;
 }
 
 export interface User {
   id: string;
   email: string;
-  role: 'user' | 'tenant' | 'admin';
   is_active: boolean;
   created_at: string;
   updated_at?: string;
@@ -43,6 +48,15 @@ export interface MessageResponse {
 export interface LoginResponse {
   message: string;
   csrf_token: string;
+  access_token: string;
+  user: User;
+}
+
+export interface ExchangeResponse {
+  is_new_user: boolean;
+  csrf_token: string;
+  access_token: string;
+  user: User;
 }
 
 export interface TokenResponse {

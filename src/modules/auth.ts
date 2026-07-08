@@ -1,3 +1,9 @@
+/**
+ * @fileoverview Authentication module for the Cerberus SDK.
+ * Defines the AuthModule class which handles registration, local login, 
+ * OAuth flows, password management, and session management.
+ */
+
 import { AxiosInstance } from 'axios';
 import { MessageResponse, LoginResponse, Session } from '../types';
 import type { CerberusClient } from '../client';
@@ -5,7 +11,6 @@ import type { CerberusClient } from '../client';
 export class AuthModule {
   constructor(
     private client: AxiosInstance,
-    private apiKey: string,
     private setCsrfToken?: (token: string) => void,
     private parentClient?: CerberusClient
   ) {}
@@ -38,7 +43,13 @@ export class AuthModule {
       this.setCsrfToken(response.data.csrf_token);
     }
     if (this.parentClient) {
-      this.parentClient.users.getMe(true).catch(() => {});
+      if (response.data.access_token) {
+        this.parentClient.setAccessToken(response.data.access_token);
+        (this.parentClient as any).axiosInstance.defaults.headers.common['Authorization'] = `Bearer ${response.data.access_token}`;
+      }
+      if (response.data.user) {
+        this.parentClient.users.setUser(response.data.user);
+      }
     }
     return response.data;
   }
@@ -75,16 +86,6 @@ export class AuthModule {
     if (typeof window !== 'undefined') {
       window.location.href = redirectUrl;
     }
-  }
-
-  /**
-   * @deprecated Use initiateOAuthLogin(provider) instead.
-   * Returns a URL with the api_key in the query string (appears in browser history).
-   */
-  getOAuthLoginUrl(provider: string): string {
-    const url = new URL(`${this.client.defaults.baseURL}/auth/login/${provider}`);
-    url.searchParams.append('api_key', this.apiKey);
-    return url.toString();
   }
 
   /**

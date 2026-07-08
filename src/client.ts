@@ -1,5 +1,12 @@
+/**
+ * @fileoverview Core client for the Cerberus SDK.
+ * Defines the CerberusClient class which manages API configuration, 
+ * token rotation (access tokens & CSRF), Axios interceptors, 
+ * and provides access to sub-modules like Auth and Users.
+ */
+
 import axios, { AxiosInstance } from 'axios';
-import { CerberusConfig, TokenResponse, User } from './types';
+import { CerberusConfig, ExchangeResponse, TokenResponse, User } from './types';
 import { AuthModule } from './modules/auth';
 import { UsersModule } from './modules/users';
 
@@ -8,22 +15,18 @@ export class CerberusClient {
   private accessToken: string | null = null;
   private csrfToken: string | null = null;
   private tokenListeners = new Set<(token: string | null) => void>();
-  
-  private currentUser: User | null = null;
-  private userPromise: Promise<User | null> | null = null;
   public auth: AuthModule;
   public users: UsersModule;
 
   constructor(config: CerberusConfig) {
-    if (!config.baseUrl) {
-      throw new Error("CerberusClient requires a 'baseUrl'");
-    }
     if (!config.apiKey) {
       throw new Error("CerberusClient requires an 'apiKey'");
     }
 
+    const baseUrl = config.baseUrl || 'https://cerberus-api.aymahajan.in';
+
     this.axiosInstance = axios.create({
-      baseURL: config.baseUrl,
+      baseURL: baseUrl,
       withCredentials: true, // Crucial for HttpOnly cookies
       headers: {
         'Content-Type': 'application/json',
@@ -55,84 +58,9 @@ export class CerberusClient {
       return config;
     });
 
-    let isRefreshing = false;
-    let failedQueue: Array<{
-      resolve: (token: string | null) => void;
-      reject: (error: unknown) => void;
-    }> = [];
+    this.createAuthInterceptor(this.axiosInstance, true);
 
-    const processQueue = (error: any, token: string | null = null) => {
-      failedQueue.forEach(prom => {
-        if (error) {
-          prom.reject(error);
-        } else {
-          prom.resolve(token);
-        }
-      });
-      failedQueue = [];
-    };
-
-    // Handle global errors and silent token refresh
-    this.axiosInstance.interceptors.response.use(
-      (response) => response,
-      async (error) => {
-        const originalRequest = error.config;
-        if (!originalRequest) {
-          throw error;
-        }
-
-        if (error.response?.status === 401 && !originalRequest._retry && originalRequest.url !== '/auth/refresh' && originalRequest.url !== '/auth/login/local') {
-          if (isRefreshing) {
-            return new Promise<string | null>(function(resolve, reject) {
-              failedQueue.push({ resolve, reject });
-            }).then(token => {
-              originalRequest.headers = originalRequest.headers ?? {};
-              originalRequest.headers.Authorization = 'Bearer ' + token;
-              return axiosInstance(originalRequest);
-            }).catch(err => {
-              return Promise.reject(err);
-            });
-          }
-
-          originalRequest._retry = true;
-          isRefreshing = true;
-
-          try {
-            const response = await axiosInstance.post<TokenResponse>('/auth/refresh');
-            const token = response.data.access_token;
-            if (response.data.csrf_token) {
-              this.setCsrfToken(response.data.csrf_token);
-            }
-            
-            this.setAccessToken(token);
-            axiosInstance.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-            originalRequest.headers = originalRequest.headers ?? {};
-            originalRequest.headers.Authorization = `Bearer ${token}`;
-            processQueue(null, token);
-            
-            return axiosInstance(originalRequest);
-          } catch (refreshError) {
-            processQueue(refreshError, null);
-            // Don't throw a generic error here; clear headers and return rejection
-            this.setAccessToken(null);
-            delete axiosInstance.defaults.headers.common['Authorization'];
-            return Promise.reject(refreshError);
-          } finally {
-            isRefreshing = false;
-          }
-        }
-
-        if (error.response && error.response.data) {
-          const detail = error.response.data.detail;
-          if (typeof detail === 'string') {
-            throw new Error(detail);
-          }
-        }
-        throw error;
-      }
-    );
-
-    this.auth = new AuthModule(this.axiosInstance, config.apiKey, (token) => this.setCsrfToken(token), this);
+    this.auth = new AuthModule(this.axiosInstance, (token) => this.setCsrfToken(token), this);
     this.users = new UsersModule(this.axiosInstance, this);
   }
 
@@ -182,39 +110,143 @@ export class CerberusClient {
 
   /**
    * Redeem a one-time OAuth exchange code for session cookies and an access token.
-   *
-   * After a successful OAuth login your frontend receives a redirect to
-   * `<your-app>/auth/callback?code=<code>&new_user=<bool>`. Call this method
-   * from that page to complete the flow:
-   *
-   * ```ts
-   * const { isNewUser } = await cerberus.exchangeOAuthCode(code);
-   * // You are now fully logged in!
-   * ```
-   *
-   * Internally this calls POST /auth/exchange, which:
-   *   1. Validates and consumes the one-time code
-   *   2. Sets the HttpOnly refresh_token cookie on cerberus-api
-   *   3. Returns the csrf_token in the response body
-   *
-   * The returned CSRF token is stored in memory and automatically attached as
-   * the X-CSRF header on all subsequent requests. The SDK then automatically
-   * fetches your initial access token and user profile.
    */
-  async exchangeOAuthCode(code: string): Promise<{ isNewUser: boolean }> {
-    const response = await this.axiosInstance.post<{ is_new_user: boolean; csrf_token: string }>(
+  async exchangeOAuthCode(code: string): Promise<{ isNewUser: boolean; user: User; accessToken: string }> {
+    const response = await this.axiosInstance.post<ExchangeResponse>(
       '/auth/exchange',
       { code },
     );
     // Store the CSRF token in memory
     this.csrfToken = response.data.csrf_token;
-    
-    // Automatically fetch the initial access token
-    await this.refreshAccessToken();
 
-    // Asynchronously fetch the user to update cache
-    this.users.getMe(true).catch(() => {});
-    
-    return { isNewUser: response.data.is_new_user };
+    // Set access token directly from response
+    this.setAccessToken(response.data.access_token);
+    this.axiosInstance.defaults.headers.common['Authorization'] = `Bearer ${response.data.access_token}`;
+
+    // Set user directly from response
+    this.users.setUser(response.data.user);
+
+    return {
+      isNewUser: response.data.is_new_user,
+      user: response.data.user,
+      accessToken: response.data.access_token
+    };
+  }
+
+  /**
+   * Retrieves the current access token.
+   * If the token is expired or expires within 30 seconds, it will automatically refresh it.
+   */
+  async getToken(): Promise<string | null> {
+    if (!this.accessToken) {
+      return null;
+    }
+    try {
+      let base64 = this.accessToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      const pad = base64.length % 4;
+      if (pad) {
+        base64 += '='.repeat(4 - pad);
+      }
+      const payload = JSON.parse(atob(base64));
+      if (payload?.exp && Math.floor(Date.now() / 1000) >= payload.exp - 30) {
+        return await this.refreshAccessToken();
+      }
+    } catch {
+      // Malformed token — return as-is; the server will reject it if expired.
+    }
+    return this.accessToken;
+  }
+
+  /**
+   * Attaches Cerberus token rotation interceptors to your own Axios instance.
+   * This automatically injects the Authorization header and seamlessly handles 
+   * 401 retries by calling Cerberus /refresh internally.
+   */
+  attachInterceptor(clientInstance: AxiosInstance): void {
+    // 1. Inject Token
+    clientInstance.interceptors.request.use(async (config) => {
+      // Do not block the request for getToken() if we don't even have an initial token,
+      // just pass what we currently have in memory. The 401 interceptor will catch it if it's invalid.
+      const token = this.accessToken;
+      if (token) {
+        config.headers['Authorization'] = `Bearer ${token}`;
+      }
+      return config;
+    });
+
+    // 2. Handle 401 retries
+    this.createAuthInterceptor(clientInstance, false);
+  }
+
+  private createAuthInterceptor(client: AxiosInstance, isInternal: boolean) {
+    let isRefreshing = false;
+    let failedQueue: Array<{
+      resolve: (token: string | null) => void;
+      reject: (error: unknown) => void;
+    }> = [];
+
+    const processQueue = (error: any, token: string | null = null) => {
+      failedQueue.forEach(prom => {
+        if (error) {
+          prom.reject(error);
+        } else {
+          prom.resolve(token);
+        }
+      });
+      failedQueue = [];
+    };
+
+    client.interceptors.response.use(
+      (response) => response,
+      async (error) => {
+        const originalRequest = error.config;
+        if (!originalRequest) return Promise.reject(error);
+
+        const isAuthRoute = originalRequest.url?.includes('/auth/refresh') || originalRequest.url?.includes('/auth/login/local');
+
+        if (error.response?.status === 401 && !originalRequest._retry && !isAuthRoute) {
+          if (isRefreshing) {
+            return new Promise<string | null>(function (resolve, reject) {
+              failedQueue.push({ resolve, reject });
+            }).then(token => {
+              originalRequest.headers = originalRequest.headers ?? {};
+              originalRequest.headers['Authorization'] = `Bearer ${token}`;
+              return client(originalRequest);
+            }).catch(err => {
+              return Promise.reject(err);
+            });
+          }
+
+          originalRequest._retry = true;
+          isRefreshing = true;
+
+          try {
+            const token = await this.refreshAccessToken();
+            originalRequest.headers = originalRequest.headers ?? {};
+            originalRequest.headers['Authorization'] = `Bearer ${token}`;
+            processQueue(null, token);
+            return client(originalRequest);
+          } catch (refreshError) {
+            processQueue(refreshError, null);
+            if (isInternal) {
+              this.setAccessToken(null);
+              delete this.axiosInstance.defaults.headers.common['Authorization'];
+            }
+            return Promise.reject(refreshError);
+          } finally {
+            isRefreshing = false;
+          }
+        }
+
+        if (isInternal && error.response && error.response.data) {
+          const detail = error.response.data.detail;
+          if (typeof detail === 'string') {
+            throw new Error(detail);
+          }
+        }
+        throw error;
+      }
+    );
   }
 }
+

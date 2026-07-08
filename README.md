@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://cerberus.aymahajan.in/logo.webp" alt="Cerberus Logo" width="80" />
+<img src="  " alt="Cerberus Logo" width="80" />
 
 # `@cerberus/sdk`
 
@@ -18,7 +18,9 @@ Integrate production-ready authentication into any frontend — React, Vue, Next
 
 ---
 
-> **Looking for the backend?** This is the frontend SDK only. The core Auth-as-a-Service engine and the Global Admin Dashboard live in the main repository: **[Avneesh11905/cerberus](https://github.com/Avneesh11905/cerberus)**.
+> **Looking for the backend?** This is the frontend SDK only. The core Auth-as-a-Service engine and the Dashboard live in the main repository: **[Avneesh11905/cerberus](https://github.com/Avneesh11905/cerberus)**.
+> 
+> ⚠️ **SSR Warning:** This SDK maintains state internally. Do **not** use `CerberusClient` as a global singleton in Server-Side Rendering (SSR) environments like Next.js, Nuxt, or SvelteKit, as it will cause authentication state to bleed across different users' requests. Instantiate it per-request or strictly in client-side code.
 
 ---
 
@@ -38,11 +40,12 @@ Integrate production-ready authentication into any frontend — React, Vue, Next
 
 ## 📋 Prerequisites: Dashboard Setup
 
-Before using the SDK, set up your project in the [Cerberus Dashboard](https://cerberus.aymahajan.in/dashboard):
+Before using the SDK, set up your project in the [Cerberus Dashboard](https://cerberus.aymahajan.in):
 
-1. **Create a Project** — Go to your Dashboard and click **"New Project"**. Projects logically isolate your users and configuration.
-2. **Add Allowed Origins** — In your project's settings, add every URL your frontend will run on (e.g., `http://localhost:3000`, `https://your-app.com`). This is required for the browser to accept cross-origin auth cookies.
-3. **Copy your Project API Key** — From the **"Access Keys & Secrets"** tab, copy your `cerb_live_...` key. This is your `apiKey` for SDK initialization.
+1. **Sign Up / Log In** — Create an account and log in to access your Dashboard.
+2. **Create a Project** — From your Dashboard, click **"New Project"**. Projects logically isolate your users and configuration.
+3. **Add Allowed Origins** — In your project's settings, add every URL your frontend will run on (e.g., `http://localhost:3000`, `https://your-app.com`). This is required for the browser to accept cross-origin auth cookies.
+4. **Copy your Project API Key** — From the **"Access Keys & Secrets"** tab, copy your `cerb_...` key. This is your `apiKey` for SDK initialization.
 
 > [!IMPORTANT]
 > Your Allowed Origins must match your frontend URL **exactly** (including the port). A mismatch is the #1 cause of authentication failures.
@@ -74,15 +77,15 @@ Create the client **once** and export it. Import this instance anywhere in your 
 import { CerberusClient } from '@cerberus/sdk';
 
 export const cerberus = new CerberusClient({
-  baseUrl: 'https://cerberus-api.aymahajan.in', // The Cerberus Authentication URL
-  apiKey:  'cerb_live_XXXXXXXXXX',              // Your Project API Key from the Dashboard
+  apiKey:  'cerb_XXXXXXXXXX', // Your Project API Key from the Dashboard
+  // baseUrl: 'https://...',     // Optional: Only needed if you are self-hosting the backend
 });
 ```
 
 | Option | Type | Description |
 |---|---|---|
-| `baseUrl` | `string` | The URL of the Cerberus authentication backend. |
-| `apiKey` | `string` | Your project's public API key (`cerb_live_...`). |
+| `baseUrl` | `string?` | **Optional**. The URL of your backend. Defaults to the Cerberus Cloud (`https://cerberus-api.aymahajan.in`). |
+| `apiKey` | `string` | **Required**. Your project's public API key (`cerb_...`). |
 
 ---
 
@@ -156,6 +159,28 @@ if (result) {
 |---|---|
 | `auth.initiateOAuthLogin(provider)` | `Promise<void>` (redirects) |
 | `auth.handleOAuthCallback()` | `Promise<{ user: User, isNewUser: boolean } \| null>` |
+
+#### Password Management
+
+```typescript
+// Request a password reset email
+await cerberus.auth.requestPasswordReset('user@domain.com');
+
+// Execute a password reset using the token from the email
+await cerberus.auth.executePasswordReset('reset-token-123', 'new_secure_password123!');
+
+// Change the password for an authenticated user
+await cerberus.auth.changePassword({
+  current_password: 'old_password',
+  new_password: 'new_secure_password123!'
+});
+```
+
+| Method | Returns |
+|---|---|
+| `auth.requestPasswordReset(email)` | `Promise<MessageResponse>` |
+| `auth.executePasswordReset(token, new_password)` | `Promise<MessageResponse>` |
+| `auth.changePassword(data)` | `Promise<MessageResponse>` |
 
 ---
 
@@ -237,6 +262,32 @@ Your Request ──► API (401: Token Expired)
 
 This eliminates race conditions where multiple concurrent requests each independently attempt a refresh.
 
+### ⚙️ Interceptors & Token Subscribers
+
+If you are using your own API client to talk to your proprietary backend, or if you need to manually bind the SDK state to React, you can use these helpers:
+
+```typescript
+// 1. Sync SDK Token state with React/Vue
+const unsubscribe = cerberus.onTokenChange((newToken) => {
+  // Triggered on login, logout, and background silent refreshes
+  console.log("Token is now:", newToken); 
+});
+
+// 2. Attach Cerberus logic to your own Axios instance
+const myBackendApi = axios.create({ baseURL: 'https://api.mycoolapp.com' });
+cerberus.attachInterceptor(myBackendApi);
+// myBackendApi will now automatically inject Bearer tokens and retry on 401s!
+
+// 3. Manually get a token (auto-refreshes if expiring within 30s)
+const token = await cerberus.getToken();
+```
+
+| Method | Returns |
+|---|---|
+| `cerberus.onTokenChange(listener)` | `() => void` (Unsubscribe function) |
+| `cerberus.attachInterceptor(axios)`| `void` |
+| `cerberus.getToken()` | `Promise<string \| null>` |
+
 ---
 
 ## 🛡️ Protecting Routes (React Example)
@@ -309,7 +360,6 @@ export function GuestRoute({ children }: { children: React.ReactNode }) {
 interface User {
   id:              string;
   email:           string;
-  role:            'user' | 'tenant' | 'admin';
   is_active:       boolean;
   created_at:      string;
   updated_at?:     string;
@@ -330,8 +380,16 @@ interface Session {
   auth_provider: string;
 }
 
-interface MessageResponse { message: string; }
-interface LoginResponse   { message: string; csrf_token: string; }
+interface MessageResponse {
+  message: string;
+}
+
+interface LoginResponse {
+  message: string;
+  csrf_token: string;
+  access_token: string;
+  user: User;
+}
 ```
 
 ---
